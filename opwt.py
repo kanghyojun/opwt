@@ -1056,14 +1056,57 @@ def build_snapshot(base_path: str, alias_store: AliasStore) -> List[Worktree]:
     return worktrees
 
 
+def char_display_width(char: str) -> int:
+    if not char:
+        return 0
+    if unicodedata.combining(char):
+        return 0
+    if unicodedata.category(char).startswith("C"):
+        return 0
+    if unicodedata.east_asian_width(char) in {"W", "F"}:
+        return 2
+    return 1
+
+
+def display_width(text: str) -> int:
+    return sum(char_display_width(char) for char in text)
+
+
+def clip_to_display_width(text: str, max_width: int) -> str:
+    if max_width <= 0:
+        return ""
+    consumed = 0
+    chars: List[str] = []
+    for char in text:
+        width = char_display_width(char)
+        if consumed + width > max_width:
+            break
+        chars.append(char)
+        consumed += width
+    return "".join(chars)
+
+
+def trim_left_display_width(text: str, trim_width: int) -> str:
+    if trim_width <= 0:
+        return text
+
+    consumed = 0
+    index = 0
+    while index < len(text) and consumed < trim_width:
+        width = char_display_width(text[index])
+        consumed += width if width > 0 else 1
+        index += 1
+    return text[index:]
+
+
 def fit(text: str, width: int) -> str:
     if width <= 0:
         return ""
-    if len(text) <= width:
+    if display_width(text) <= width:
         return text
     if width <= 3:
-        return text[:width]
-    return text[: width - 3] + "..."
+        return clip_to_display_width(text, width)
+    return clip_to_display_width(text, width - 3) + "..."
 
 
 def safe_addstr(
@@ -1073,7 +1116,7 @@ def safe_addstr(
     if y < 0 or y >= height or x >= width:
         return
     if x < 0:
-        text = text[-x:]
+        text = trim_left_display_width(text, -x)
         x = 0
     clipped = fit(text, width - x - 1)
     if not clipped:
@@ -1211,7 +1254,7 @@ def draw_worktree_header_line(
     def put(segment: str, attr: int = 0) -> None:
         nonlocal cursor
         safe_addstr(stdscr, y, cursor, segment, select_attr | attr)
-        cursor += len(segment)
+        cursor += display_width(segment)
 
     put(f"{marker} {name} ", curses.A_BOLD)
     put(branch, colors.get("branch", curses.A_DIM))
@@ -1289,6 +1332,7 @@ def draw_sidebar(
                 )
                 name_label = session_display_name(session)
                 prefix = f"   {state_label} "
+                prefix_width = display_width(prefix)
                 safe_addstr(
                     stdscr,
                     y,
@@ -1299,8 +1343,8 @@ def draw_sidebar(
                 safe_addstr(
                     stdscr,
                     y,
-                    start_x + len(prefix),
-                    fit(name_label, max(6, line_width - len(prefix) + 3)),
+                    start_x + prefix_width,
+                    fit(name_label, max(6, line_width - prefix_width + 3)),
                     select_attr,
                 )
                 y += 1
@@ -1444,12 +1488,13 @@ def draw_detail_panel(
             f"[{idx}] "
             f"{session_state_display(session.state, running_frame, permission_ask_frame)} "
         )
+        prefix_width = display_width(prefix)
         safe_addstr(stdscr, y, start_x, prefix, colors.get(session.state, 0))
         safe_addstr(
             stdscr,
             y,
-            start_x + len(prefix),
-            fit(session_display_name(session), max(8, width - len(prefix) - 1)),
+            start_x + prefix_width,
+            fit(session_display_name(session), max(8, width - prefix_width - 1)),
         )
         y += 1
 
@@ -1681,7 +1726,7 @@ def draw(stdscr: curses.window, state: AppState, colors: Dict[str, int]) -> None
         )
         safe_addstr(stdscr, prompt_y + 1, 0, "> " + state.rename_input)
         safe_addstr(stdscr, prompt_y + 2, 0, "default: directory name")
-        cursor_x = min(width - 2, 2 + len(state.rename_input))
+        cursor_x = min(width - 2, 2 + display_width(state.rename_input))
         try:
             curses.curs_set(1)
             stdscr.move(prompt_y + 1, cursor_x)
