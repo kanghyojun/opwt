@@ -530,6 +530,41 @@ def load_opencode_running_tools(session_ids: List[str]) -> Dict[str, Tuple[str, 
     return result
 
 
+def load_pending_permission_sessions(session_ids: List[str]) -> Dict[str, bool]:
+    if not session_ids:
+        return {}
+
+    db_path = opencode_db_path()
+    if not db_path.exists():
+        return {}
+
+    placeholders = ",".join("?" for _ in session_ids)
+    query = (
+        "SELECT "
+        "COALESCE(json_extract(data, '$.sessionID'), json_extract(data, '$.sessionId'), '') "
+        "FROM permission "
+        f"WHERE COALESCE(json_extract(data, '$.sessionID'), json_extract(data, '$.sessionId'), '') IN ({placeholders})"
+    )
+
+    try:
+        connection = sqlite3.connect(str(db_path))
+        connection.row_factory = sqlite3.Row
+        try:
+            rows = connection.execute(query, session_ids).fetchall()
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        return {}
+
+    pending: Dict[str, bool] = {}
+    for row in rows:
+        session_id = str(row[0] or "")
+        if session_id:
+            pending[session_id] = True
+
+    return pending
+
+
 def load_opencode_step_activity(session_ids: List[str]) -> Dict[str, bool]:
     if not session_ids:
         return {}
@@ -582,7 +617,11 @@ def load_opencode_step_activity(session_ids: List[str]) -> Dict[str, bool]:
 def opencode_session_state(
     activity: Optional[Tuple[str, str]],
     step_active: bool = False,
+    permission_pending: bool = False,
 ) -> str:
+    if permission_pending:
+        return "permission-ask"
+
     if not activity:
         if step_active:
             return "running"
@@ -917,6 +956,7 @@ def sessions_by_worktree(worktree_paths: List[str]) -> Dict[str, List[Session]]:
         }
 
     activity_map = load_opencode_running_tools(session_ids)
+    permission_map = load_pending_permission_sessions(session_ids)
     step_activity_map = load_opencode_step_activity(session_ids)
 
     for session_id, process in sessions_by_id.items():
@@ -934,6 +974,7 @@ def sessions_by_worktree(worktree_paths: List[str]) -> Dict[str, List[Session]]:
         state = opencode_session_state(
             activity_map.get(session_id),
             step_active=step_activity_map.get(session_id, False),
+            permission_pending=permission_map.get(session_id, False),
         )
         tty = tty_label(None, process, process.tty_nr)
         session = Session(
