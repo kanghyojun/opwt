@@ -105,6 +105,7 @@ class Session:
 class Worktree:
     path: str
     alias: str = ""
+    is_current: bool = False
     head: str = ""
     branch_ref: str = ""
     branch: str = ""
@@ -1040,6 +1041,7 @@ def session_state_display(
 
 def build_snapshot(base_path: str, alias_store: AliasStore) -> List[Worktree]:
     worktrees = discover_worktrees(base_path)
+    current_worktree_path = match_worktree_path(base_path, [w.path for w in worktrees])
 
     for worktree in worktrees:
         try:
@@ -1051,6 +1053,7 @@ def build_snapshot(base_path: str, alias_store: AliasStore) -> List[Worktree]:
 
     for worktree in worktrees:
         worktree.alias = alias_store.name_for(worktree.path)
+        worktree.is_current = worktree.path == current_worktree_path
         worktree.sessions = sessions_map.get(worktree.path, [])
 
     return worktrees
@@ -1246,6 +1249,7 @@ def draw_worktree_header_line(
     colors: Dict[str, int],
 ) -> None:
     marker = ">" if selected else " "
+    current_marker = "v" if worktree.is_current else " "
     name = fit(worktree.alias, max(8, width // 3))
     branch = fit(display_branch(worktree), max(6, width // 4))
     select_attr = curses.A_REVERSE if selected else 0
@@ -1256,7 +1260,7 @@ def draw_worktree_header_line(
         safe_addstr(stdscr, y, cursor, segment, select_attr | attr)
         cursor += display_width(segment)
 
-    put(f"{marker} {name} ", curses.A_BOLD)
+    put(f"{marker}{current_marker} {name} ", curses.A_BOLD)
     put(branch, colors.get("branch", curses.A_DIM))
 
     if worktree.git_error:
