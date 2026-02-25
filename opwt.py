@@ -20,6 +20,21 @@ REFRESH_INTERVAL_SECONDS = 3.0
 GIT_TIMEOUT_SECONDS = 2.0
 SIDEBAR_SESSION_PREVIEW = 4
 DETAIL_SPLIT_MIN_WIDTH = 96
+RUNNING_ANIMATION_FRAMES = (
+    "⠋",
+    "⠙",
+    "⠹",
+    "⠸",
+    "⠼",
+    "⠴",
+    "⠦",
+    "⠧",
+    "⠇",
+    "⠏",
+)
+RUNNING_ANIMATION_FRAME_SECONDS = 0.09
+PERMISSION_ASK_ANIMATION_FRAMES = ("?", "!")
+PERMISSION_ASK_ANIMATION_FRAME_SECONDS = 0.45
 
 SHELL_NAMES = {
     "bash",
@@ -504,12 +519,68 @@ def load_opencode_running_tools(session_ids: List[str]) -> Dict[str, Tuple[str, 
     return result
 
 
-def opencode_session_state(activity: Optional[Tuple[str, str]]) -> str:
+def load_opencode_step_activity(session_ids: List[str]) -> Dict[str, bool]:
+    if not session_ids:
+        return {}
+
+    db_path = opencode_db_path()
+    if not db_path.exists():
+        return {}
+
+    placeholders = ",".join("?" for _ in session_ids)
+    query = (
+        "SELECT session_id, "
+        "MAX(CASE "
+        "WHEN json_extract(data, '$.type') = 'step-start' THEN time_updated "
+        "ELSE 0 END), "
+        "MAX(CASE "
+        "WHEN json_extract(data, '$.type') = 'step-finish' THEN time_updated "
+        "ELSE 0 END) "
+        "FROM part "
+        f"WHERE session_id IN ({placeholders}) "
+        "AND json_extract(data, '$.type') IN ('step-start', 'step-finish') "
+        "GROUP BY session_id"
+    )
+
+    try:
+        connection = sqlite3.connect(str(db_path))
+        connection.row_factory = sqlite3.Row
+        try:
+            rows = connection.execute(query, session_ids).fetchall()
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        return {}
+
+    activity: Dict[str, bool] = {}
+    for row in rows:
+        session_id = str(row["session_id"])
+        try:
+            last_step_start = int(row[1] or 0)
+        except (TypeError, ValueError):
+            last_step_start = 0
+        try:
+            last_step_finish = int(row[2] or 0)
+        except (TypeError, ValueError):
+            last_step_finish = 0
+        activity[session_id] = last_step_start > last_step_finish
+
+    return activity
+
+
+def opencode_session_state(
+    activity: Optional[Tuple[str, str]],
+    step_active: bool = False,
+) -> str:
     if not activity:
+        if step_active:
+            return "running"
         return "idle"
 
     status, tool = activity
     if status not in {"running", "pending"}:
+        if step_active:
+            return "running"
         return "idle"
 
     tool_lower = tool.lower().strip()
@@ -835,6 +906,7 @@ def sessions_by_worktree(worktree_paths: List[str]) -> Dict[str, List[Session]]:
         }
 
     activity_map = load_opencode_running_tools(session_ids)
+    step_activity_map = load_opencode_step_activity(session_ids)
 
     for session_id, process in sessions_by_id.items():
         session_meta = metadata.get(session_id, {})
@@ -848,7 +920,10 @@ def sessions_by_worktree(worktree_paths: List[str]) -> Dict[str, List[Session]]:
         if not worktree_path:
             continue
 
-        state = opencode_session_state(activity_map.get(session_id))
+        state = opencode_session_state(
+            activity_map.get(session_id),
+            step_active=step_activity_map.get(session_id, False),
+        )
         tty = tty_label(None, process, process.tty_nr)
         session = Session(
             tty=tty,
@@ -933,18 +1008,34 @@ def session_display_name(session: Session) -> str:
     return "opencode"
 
 
-def session_state_symbol(state: str) -> str:
+def session_state_symbol(
+    state: str,
+    running_frame: int = 0,
+    permission_ask_frame: int = 0,
+) -> str:
     if state == "idle":
         return "·"
     if state == "running":
+        if RUNNING_ANIMATION_FRAMES:
+            return RUNNING_ANIMATION_FRAMES[
+                running_frame % len(RUNNING_ANIMATION_FRAMES)
+            ]
         return "⚙"
     if state == "permission-ask":
+        if PERMISSION_ASK_ANIMATION_FRAMES:
+            return PERMISSION_ASK_ANIMATION_FRAMES[
+                permission_ask_frame % len(PERMISSION_ASK_ANIMATION_FRAMES)
+            ]
         return "?"
     return "*"
 
 
-def session_state_display(state: str) -> str:
-    return session_state_symbol(state)
+def session_state_display(
+    state: str,
+    running_frame: int = 0,
+    permission_ask_frame: int = 0,
+) -> str:
+    return session_state_symbol(state, running_frame, permission_ask_frame)
 
 
 def build_snapshot(base_path: str, alias_store: AliasStore) -> List[Worktree]:
@@ -1145,6 +1236,8 @@ def draw_sidebar(
     stdscr: curses.window,
     state: AppState,
     colors: Dict[str, int],
+    running_frame: int,
+    permission_ask_frame: int,
     start_y: int,
     start_x: int,
     width: int,
@@ -1187,7 +1280,11 @@ def draw_sidebar(
                 if y >= max_y:
                     break
                 state_label = fit(
-                    session_state_display(session.state),
+                    session_state_display(
+                        session.state,
+                        running_frame,
+                        permission_ask_frame,
+                    ),
                     max(6, line_width // 3),
                 )
                 name_label = session_display_name(session)
@@ -1226,6 +1323,8 @@ def draw_detail_panel(
     stdscr: curses.window,
     worktree: Worktree,
     colors: Dict[str, int],
+    running_frame: int,
+    permission_ask_frame: int,
     start_y: int,
     start_x: int,
     width: int,
@@ -1341,7 +1440,10 @@ def draw_detail_panel(
         if y >= max_y:
             break
 
-        prefix = f"[{idx}] {session_state_display(session.state)} "
+        prefix = (
+            f"[{idx}] "
+            f"{session_state_display(session.state, running_frame, permission_ask_frame)} "
+        )
         safe_addstr(stdscr, y, start_x, prefix, colors.get(session.state, 0))
         safe_addstr(
             stdscr,
@@ -1465,6 +1567,9 @@ def init_colors() -> Dict[str, int]:
 def draw(stdscr: curses.window, state: AppState, colors: Dict[str, int]) -> None:
     stdscr.erase()
     height, width = stdscr.getmaxyx()
+    now = time.monotonic()
+    running_frame = int(now / RUNNING_ANIMATION_FRAME_SECONDS)
+    permission_ask_frame = int(now / PERMISSION_ASK_ANIMATION_FRAME_SECONDS)
 
     line = 0
     safe_addstr(stdscr, line, 0, "opwt", curses.A_BOLD)
@@ -1493,6 +1598,8 @@ def draw(stdscr: curses.window, state: AppState, colors: Dict[str, int]) -> None
             stdscr,
             state,
             colors,
+            running_frame,
+            permission_ask_frame,
             content_top,
             0,
             sidebar_width,
@@ -1520,6 +1627,8 @@ def draw(stdscr: curses.window, state: AppState, colors: Dict[str, int]) -> None
                 stdscr,
                 wt,
                 colors,
+                running_frame,
+                permission_ask_frame,
                 content_top,
                 divider_x + 2,
                 max(8, width - (divider_x + 3)),
@@ -1541,6 +1650,8 @@ def draw(stdscr: curses.window, state: AppState, colors: Dict[str, int]) -> None
                 stdscr,
                 wt,
                 colors,
+                running_frame,
+                permission_ask_frame,
                 content_top,
                 0,
                 max(8, width - 1),
@@ -1551,6 +1662,8 @@ def draw(stdscr: curses.window, state: AppState, colors: Dict[str, int]) -> None
             stdscr,
             state,
             colors,
+            running_frame,
+            permission_ask_frame,
             content_top,
             0,
             max(8, width - 1),
