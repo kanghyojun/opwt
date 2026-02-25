@@ -70,6 +70,8 @@ class GitStatus:
     upstream: str = ""
     ahead: int = 0
     behind: int = 0
+    staged: int = 0
+    unstaged: int = 0
     dirty: bool = False
     changed: int = 0
     untracked: int = 0
@@ -301,7 +303,15 @@ def git_status_for_worktree(worktree_path: str) -> GitStatus:
         status.dirty = True
         if line.startswith("? ") or line.startswith("??"):
             status.untracked += 1
+            status.unstaged += 1
         else:
+            if line.startswith(("1 ", "2 ", "u ")):
+                fields = line.split()
+                xy = fields[1] if len(fields) > 1 else ""
+                if len(xy) >= 1 and xy[0] != ".":
+                    status.staged += 1
+                if len(xy) >= 2 and xy[1] != ".":
+                    status.unstaged += 1
             status.changed += 1
 
     return status
@@ -977,7 +987,7 @@ def format_git_column(worktree: Worktree) -> str:
     if worktree.git_error:
         return "status:error"
     state = "dirty" if worktree.status.dirty else "clean"
-    return f"{state} +{worktree.status.ahead}/-{worktree.status.behind}"
+    return f"{state} +{worktree.status.staged}/-{worktree.status.unstaged}"
 
 
 def session_summary(sessions: List[Session]) -> str:
@@ -1273,9 +1283,9 @@ def draw_worktree_header_line(
     put(" (")
     put(git_state)
     put(" ")
-    put(f"+{worktree.status.ahead}", colors.get("plus", 0))
+    put(f"+{worktree.status.staged}", colors.get("plus", 0))
     put("/")
-    put(f"-{worktree.status.behind}", colors.get("minus", 0))
+    put(f"-{worktree.status.unstaged}", colors.get("minus", 0))
     put(")")
 
 
@@ -1429,20 +1439,20 @@ def draw_detail_panel(
             stdscr,
             y,
             start_x + len(f"git: {git_state} "),
-            f"+{worktree.status.ahead}",
+            f"+{worktree.status.staged}",
             colors.get("plus", 0),
         )
         safe_addstr(
             stdscr,
             y,
-            start_x + len(f"git: {git_state} +{worktree.status.ahead}"),
+            start_x + len(f"git: {git_state} +{worktree.status.staged}"),
             "/",
         )
         safe_addstr(
             stdscr,
             y,
-            start_x + len(f"git: {git_state} +{worktree.status.ahead}/"),
-            f"-{worktree.status.behind}",
+            start_x + len(f"git: {git_state} +{worktree.status.staged}/"),
+            f"-{worktree.status.unstaged}",
             colors.get("minus", 0),
         )
         y += 1
