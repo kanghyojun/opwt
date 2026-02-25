@@ -1,0 +1,9 @@
+.venv-build/
+__pycache__/
+*.py[cod]
+
+.ruff_cache/
+
+build/
+dist/
+*.spec
